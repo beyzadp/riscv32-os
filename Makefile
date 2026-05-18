@@ -8,7 +8,7 @@ BUILD_DIR = build
 
 # Compiler flags
 CFLAGS = -std=c11 -O2 -g3 -Wall -Wextra --target=riscv32-unknown-elf \
-         -fno-stack-protector -ffreestanding -nostdlib -I$(SRC_DIR)/common
+         -fno-stack-protector -ffreestanding -nostdlib -I$(SRC_DIR)/common -Iinclude -I$(SRC_DIR)/common -I$(SRC_DIR)/kernel
 
 # Linker flags for Kernel and User
 KERNEL_LDFLAGS = -fuse-ld=lld -Wl,-T$(SRC_DIR)/kernel/kernel.ld -Wl,-Map=$(BUILD_DIR)/kernel.map
@@ -16,7 +16,7 @@ USER_LDFLAGS = -fuse-ld=lld -Wl,-T$(SRC_DIR)/user/user.ld -Wl,-Map=$(BUILD_DIR)/
 
 # Source files
 KERNEL_SRCS = $(wildcard $(SRC_DIR)/kernel/*.c) $(wildcard $(SRC_DIR)/common/*.c)
-USER_SRCS = $(wildcard $(SRC_DIR)/user/*.c) $(wildcard $(SRC_DIR)/common/*.c)
+USER_SRCS = $(wildcard $(SRC_DIR)/user/*.c)
 
 # Object files (patsubst replaces the 'src/' prefix with 'build/' and '.c' with '.o')
 KERNEL_OBJS = $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(KERNEL_SRCS))
