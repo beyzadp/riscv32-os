@@ -1,10 +1,12 @@
 # Toolchain variables
 CC = /usr/bin/clang
+OBJCOPY = llvm-objcopy
 QEMU = qemu-system-riscv32
 
 # Directories
 SRC_DIR = src
 BUILD_DIR = build
+DISK_DIR = disk
 
 # Compiler flags
 CFLAGS = -std=c11 -O2 -g3 -Wall -Wextra --target=riscv32-unknown-elf \
@@ -16,7 +18,7 @@ USER_LDFLAGS = -fuse-ld=lld -Wl,-T$(SRC_DIR)/user/user.ld -Wl,-Map=$(BUILD_DIR)/
 
 # Source files
 KERNEL_SRCS = $(wildcard $(SRC_DIR)/kernel/*.c) $(wildcard $(SRC_DIR)/common/*.c)
-USER_SRCS = $(wildcard $(SRC_DIR)/user/*.c)
+USER_SRCS = $(wildcard $(SRC_DIR)/user/*.c) $(wildcard $(SRC_DIR)/common/*.c)
 
 # Object files (patsubst replaces the 'src/' prefix with 'build/' and '.c' with '.o')
 KERNEL_OBJS = $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(KERNEL_SRCS))
@@ -27,16 +29,28 @@ KERNEL_TARGET = $(BUILD_DIR)/kernel.elf
 USER_TARGET = $(BUILD_DIR)/shell.elf
 
 # QEMU arguments
-QEMU_FLAGS = -machine virt -bios default -nographic -serial mon:stdio --no-reboot -kernel $(KERNEL_TARGET)
+QEMU_FLAGS = -machine virt -bios default -nographic -serial mon:stdio --no-reboot \
+             -d unimp,guest_errors,int,cpu_reset -D qemu.log \
+             -drive id=drive0,file=disk.tar,format=raw,if=none \
+             -device virtio-blk-device,drive=drive0,bus=virtio-mmio-bus.0 \
+             -kernel $(KERNEL_TARGET)
 
 # Phony targets
-.PHONY: all run clean
+.PHONY: all shell run clean
 
 # Default target
 all: $(KERNEL_TARGET) $(USER_TARGET)
 
+# Build user shell artifacts
+shell: $(BUILD_DIR)/shell.bin.o
+
+# Build the disk image (tolerate empty disk directory)
+disk.tar: $(wildcard $(DISK_DIR)/*.txt)
+	@mkdir -p $(DISK_DIR)
+	@(cd $(DISK_DIR) && { ls *.txt >/dev/null 2>&1 && tar cf ../$@ --format=ustar *.txt || tar cf ../$@ --format=ustar --files-from /dev/null; })
+
 # Rule to link the kernel
-$(KERNEL_TARGET): $(KERNEL_OBJS)
+$(KERNEL_TARGET): $(KERNEL_OBJS) $(BUILD_DIR)/shell.bin.o
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(KERNEL_LDFLAGS) -o $@ $^
 
@@ -45,13 +59,21 @@ $(USER_TARGET): $(USER_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(USER_LDFLAGS) -o $@ $^
 
+$(BUILD_DIR)/shell.bin: $(USER_TARGET)
+	@mkdir -p $(dir $@)
+	$(OBJCOPY) --set-section-flags .bss=alloc,contents -O binary $< $@
+
+$(BUILD_DIR)/shell.bin.o: $(BUILD_DIR)/shell.bin
+	@mkdir -p $(dir $@)
+	$(OBJCOPY) -Ibinary -Oelf32-littleriscv $< $@
+
 # Rule to compile .c files into .o files inside the build directory
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Target to build and run
-run: all
+run: all disk.tar
 	$(QEMU) $(QEMU_FLAGS)
 
 # Target to clean up all built files

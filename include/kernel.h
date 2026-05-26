@@ -76,105 +76,91 @@ struct process {
     uint8_t stack[8192]; // Kernel stack
 };
 
-#define SAVE_CALLEE_REGS                                                       \
-    "sw ra,  0  * 4(sp)\n"                                                     \
-    "sw s0,  1  * 4(sp)\n"                                                     \
-    "sw s1,  2  * 4(sp)\n"                                                     \
-    "sw s2,  3  * 4(sp)\n"                                                     \
-    "sw s3,  4  * 4(sp)\n"                                                     \
-    "sw s4,  5  * 4(sp)\n"                                                     \
-    "sw s5,  6  * 4(sp)\n"                                                     \
-    "sw s6,  7  * 4(sp)\n"                                                     \
-    "sw s7,  8  * 4(sp)\n"                                                     \
-    "sw s8,  9  * 4(sp)\n"                                                     \
-    "sw s9,  10 * 4(sp)\n"                                                     \
-    "sw s10, 11 * 4(sp)\n"                                                     \
-    "sw s11, 12 * 4(sp)\n"
-
-#define RESTORE_CALLEE_REGS                                                    \
-    "lw ra,  0  * 4(sp)\n"                                                     \
-    "lw s0,  1  * 4(sp)\n"                                                     \
-    "lw s1,  2  * 4(sp)\n"                                                     \
-    "lw s2,  3  * 4(sp)\n"                                                     \
-    "lw s3,  4  * 4(sp)\n"                                                     \
-    "lw s4,  5  * 4(sp)\n"                                                     \
-    "lw s5,  6  * 4(sp)\n"                                                     \
-    "lw s6,  7  * 4(sp)\n"                                                     \
-    "lw s7,  8  * 4(sp)\n"                                                     \
-    "lw s8,  9  * 4(sp)\n"                                                     \
-    "lw s9,  10 * 4(sp)\n"                                                     \
-    "lw s10, 11 * 4(sp)\n"                                                     \
-    "lw s11, 12 * 4(sp)\n"
-
-#define SAVE_CALLER_REGS                                                       \
-    "sw ra,  0*4(sp)\n"                                                        \
-    "sw t0,  1*4(sp)\n"                                                        \
-    "sw t1,  2*4(sp)\n"                                                        \
-    "sw t2,  3*4(sp)\n"                                                        \
-    "sw t3,  4*4(sp)\n"                                                        \
-    "sw t4,  5*4(sp)\n"                                                        \
-    "sw t5,  6*4(sp)\n"                                                        \
-    "sw t6,  7*4(sp)\n"                                                        \
-    "sw a0,  8*4(sp)\n"                                                        \
-    "sw a1,  9*4(sp)\n"                                                        \
-    "sw a2,  10*4(sp)\n"                                                       \
-    "sw a3,  11*4(sp)\n"                                                       \
-    "sw a4,  12*4(sp)\n"                                                       \
-    "sw a5,  13*4(sp)\n"                                                       \
-    "sw a6,  14*4(sp)\n"                                                       \
-    "sw a7,  15*4(sp)\n"
-
-#define RESTORE_CALLER_REGS                                                    \
-    "lw ra,  0*4(sp)\n"                                                        \
-    "lw t0,  1*4(sp)\n"                                                        \
-    "lw t1,  2*4(sp)\n"                                                        \
-    "lw t2,  3*4(sp)\n"                                                        \
-    "lw t3,  4*4(sp)\n"                                                        \
-    "lw t4,  5*4(sp)\n"                                                        \
-    "lw t5,  6*4(sp)\n"                                                        \
-    "lw t6,  7*4(sp)\n"                                                        \
-    "lw a0,  8*4(sp)\n"                                                        \
-    "lw a1,  9*4(sp)\n"                                                        \
-    "lw a2,  10*4(sp)\n"                                                       \
-    "lw a3,  11*4(sp)\n"                                                       \
-    "lw a4,  12*4(sp)\n"                                                       \
-    "lw a5,  13*4(sp)\n"                                                       \
-    "lw a6,  14*4(sp)\n"                                                       \
-    "lw a7,  15*4(sp)\n"
-
-#define SAVE_ALL_REGS                                                          \
-    SAVE_CALLER_REGS                                                           \
-    "sw s0,  16*4(sp)\n"                                                       \
-    "sw s1,  17*4(sp)\n"                                                       \
-    "sw s2,  18*4(sp)\n"                                                       \
-    "sw s3,  19*4(sp)\n"                                                       \
-    "sw s4,  20*4(sp)\n"                                                       \
-    "sw s5,  21*4(sp)\n"                                                       \
-    "sw s6,  22*4(sp)\n"                                                       \
-    "sw s7,  23*4(sp)\n"                                                       \
-    "sw s8,  24*4(sp)\n"                                                       \
-    "sw s9,  25*4(sp)\n"                                                       \
-    "sw s10, 26*4(sp)\n"                                                       \
-    "sw s11, 27*4(sp)\n"
-
-#define RESTORE_ALL_REGS                                                       \
-    RESTORE_CALLER_REGS                                                        \
-    "lw s0,  16*4(sp)\n"                                                       \
-    "lw s1,  17*4(sp)\n"                                                       \
-    "lw s2,  18*4(sp)\n"                                                       \
-    "lw s3,  19*4(sp)\n"                                                       \
-    "lw s4,  20*4(sp)\n"                                                       \
-    "lw s5,  21*4(sp)\n"                                                       \
-    "lw s6,  22*4(sp)\n"                                                       \
-    "lw s7,  23*4(sp)\n"                                                       \
-    "lw s8,  24*4(sp)\n"                                                       \
-    "lw s9,  25*4(sp)\n"                                                       \
-    "lw s10, 26*4(sp)\n"                                                       \
-    "lw s11, 27*4(sp)\n"
-
 #define SATP_SV32 (1u << 31)
 #define PAGE_V (1 << 0) // "Valid" bit (entry is enabled)
 #define PAGE_R (1 << 1) // Readable
 #define PAGE_W (1 << 2) // Writable
 #define PAGE_X (1 << 3) // Executable
 #define PAGE_U (1 << 4) // User (accessible in user mode)
+
+#define SSTATUS_SPIE (1 << 5)
+#define SCAUSE_ECALL 8
+#define PROC_EXITED 2
+
+#define SECTOR_SIZE 512
+#define VIRTQ_ENTRY_NUM 16
+#define VIRTIO_DEVICE_BLK 2
+#define VIRTIO_BLK_PADDR 0x10001000
+#define VIRTIO_REG_MAGIC 0x00
+#define VIRTIO_REG_VERSION 0x04
+#define VIRTIO_REG_DEVICE_ID 0x08
+#define VIRTIO_REG_PAGE_SIZE 0x28
+#define VIRTIO_REG_QUEUE_SEL 0x30
+#define VIRTIO_REG_QUEUE_NUM_MAX 0x34
+#define VIRTIO_REG_QUEUE_NUM 0x38
+#define VIRTIO_REG_QUEUE_PFN 0x40
+#define VIRTIO_REG_QUEUE_READY 0x44
+#define VIRTIO_REG_QUEUE_NOTIFY 0x50
+#define VIRTIO_REG_DEVICE_STATUS 0x70
+#define VIRTIO_REG_DEVICE_CONFIG 0x100
+#define VIRTIO_STATUS_ACK 1
+#define VIRTIO_STATUS_DRIVER 2
+#define VIRTIO_STATUS_DRIVER_OK 4
+#define VIRTQ_DESC_F_NEXT 1
+#define VIRTQ_DESC_F_WRITE 2
+#define VIRTQ_AVAIL_F_NO_INTERRUPT 1
+#define VIRTIO_BLK_T_IN 0
+#define VIRTIO_BLK_T_OUT 1
+
+// Virtqueue Descriptor Table entry.
+struct virtq_desc {
+    uint64_t addr;
+    uint32_t len;
+    uint16_t flags;
+    uint16_t next;
+} __attribute__((packed));
+
+// Virtqueue Available Ring.
+struct virtq_avail {
+    uint16_t flags;
+    uint16_t index;
+    uint16_t ring[VIRTQ_ENTRY_NUM];
+} __attribute__((packed));
+
+// Virtqueue Used Ring entry.
+struct virtq_used_elem {
+    uint32_t id;
+    uint32_t len;
+} __attribute__((packed));
+
+// Virtqueue Used Ring.
+struct virtq_used {
+    uint16_t flags;
+    uint16_t index;
+    struct virtq_used_elem ring[VIRTQ_ENTRY_NUM];
+} __attribute__((packed));
+
+// Virtqueue.
+struct virtio_virtq {
+    struct virtq_desc descs[VIRTQ_ENTRY_NUM];
+    struct virtq_avail avail;
+    struct virtq_used used __attribute__((aligned(PAGE_SIZE)));
+    int queue_index;
+    volatile uint16_t *used_index;
+    uint16_t last_used_index;
+} __attribute__((packed));
+
+// Virtio-blk request.
+struct virtio_blk_req {
+    // First descriptor: read-only from the device
+    uint32_t type;
+    uint32_t reserved;
+    uint64_t sector;
+
+    // Second descriptor: writable by the device if it's a read operation
+    // (VIRTQ_DESC_F_WRITE)
+    uint8_t data[512];
+
+    // Third descriptor: writable by the device (VIRTQ_DESC_F_WRITE)
+    uint8_t status;
+} __attribute__((packed));

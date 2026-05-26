@@ -1,9 +1,5 @@
 #include "common.h"
-#include "kernel.h"
 
-void putchar(char ch) {
-    sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* Console Putchar */);
-}
 void printf(const char *fmt, ...) {
     va_list vargs;
     va_start(vargs, fmt);
