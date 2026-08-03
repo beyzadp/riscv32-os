@@ -63,32 +63,6 @@ struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
         }                                                                      \
     } while (0)
 
-void handle_syscall(struct trap_frame *f) {
-    switch (f->a3) {
-    case SYS_PUTCHAR:
-        putchar(f->a0);
-        break;
-    case SYS_GETCHAR:
-        while (1) {
-            long ch = getchar();
-            if (ch >= 0) {
-                f->a0 = ch;
-                break;
-            }
-
-            yield();
-        }
-        break;
-    case SYS_EXIT:
-        printf("process %d exited\n", current_proc->pid);
-        current_proc->state = PROC_EXITED;
-        yield();
-        PANIC("unreachable");
-    default:
-        PANIC("unexpected syscall a3=%x\n", f->a3);
-    }
-}
-
 void handle_trap(struct trap_frame *f) {
     uint32_t scause = READ_CSR(scause);
     uint32_t stval = READ_CSR(stval);
@@ -531,6 +505,205 @@ long getchar(void) {
     return ret.error;
 }
 
+void fs_format(void) {
+    printf("Formatting disk...\n");
+    uint8_t sector_buf[SECTOR_SIZE];
+
+    // 1. Write the Superblock
+    memset(sector_buf, 0, SECTOR_SIZE);
+    struct superblock *sb = (struct superblock *)sector_buf;
+    strcpy(sb->magic, "MYFS");
+    sb->total_blocks = blk_capacity / SECTOR_SIZE;
+    sb->dir_blocks = DIR_BLOCKS;
+    sb->data_start_block = DATA_START_IDX;
+    read_write_disk(sector_buf, SUPERBLOCK_IDX, true);
+
+    // 2. Clear Directory Blocks
+    memset(sector_buf, 0, SECTOR_SIZE);
+    for (int i = 0; i < DIR_BLOCKS; i++) {
+        read_write_disk(sector_buf, DIR_START_IDX + i, true);
+    }
+
+    // 3. Mark all data blocks as FREE_BLOCK
+    for (uint32_t i = DATA_START_IDX; i < sb->total_blocks; i++) {
+        memset(sector_buf, 0, SECTOR_SIZE);
+        struct data_block *db = (struct data_block *)sector_buf;
+        db->next_block = FREE_BLOCK;
+        read_write_disk(sector_buf, i, true);
+    }
+    printf("Disk formatted successfully!\n");
+}
+
+void fs_init(void) {
+    uint8_t sector_buf[SECTOR_SIZE];
+
+    // Read sector 0 to check for our file system
+    read_write_disk(sector_buf, SUPERBLOCK_IDX, false);
+    struct superblock *sb = (struct superblock *)sector_buf;
+
+    // If the magic string doesn't match, format the drive
+    if (strcmp(sb->magic, "MYFS") != 0) {
+        printf("No valid file system found. Initializing new MYFS...\n");
+        fs_format();
+    } else {
+        printf("MYFS file system detected!\n");
+        printf("Total blocks: %d\n", sb->total_blocks);
+    }
+}
+
+void fs_list_files(void) {
+    uint8_t sector_buf[SECTOR_SIZE];
+    int entries_per_sector =
+        SECTOR_SIZE / sizeof(struct dir_entry); // 512 / 32 = 16
+
+    printf("Files on disk:\n");
+    bool found_any = false;
+
+    // Scan all directory blocks (Sectors 1, 2, 3, and 4)
+    for (int i = 0; i < DIR_BLOCKS; i++) {
+        read_write_disk(sector_buf, DIR_START_IDX + i, false);
+        struct dir_entry *entries = (struct dir_entry *)sector_buf;
+
+        for (int j = 0; j < entries_per_sector; j++) {
+            if (entries[j].in_use) {
+                printf("- %s (%d bytes) [Starts at Block %d]\n",
+                       entries[j].name, entries[j].size,
+                       entries[j].start_block);
+                found_any = true;
+            }
+        }
+    }
+
+    if (!found_any) {
+        printf("  (Disk is empty)\n");
+    }
+}
+
+// Reads a file into a buffer. Returns the number of bytes read, or -1 if not
+// found.
+int fs_read_file(const char *filename, char *buf, int max_len) {
+    uint8_t sector_buf[SECTOR_SIZE];
+    int entries_per_sector = SECTOR_SIZE / sizeof(struct dir_entry);
+    struct dir_entry *target = NULL;
+
+    // 1. Search the directory blocks (Sectors 1-4) for the filename
+    for (int i = 0; i < DIR_BLOCKS; i++) {
+        read_write_disk(sector_buf, DIR_START_IDX + i, false);
+        struct dir_entry *entries = (struct dir_entry *)sector_buf;
+
+        for (int j = 0; j < entries_per_sector; j++) {
+            if (entries[j].in_use && strcmp(entries[j].name, filename) == 0) {
+                target = &entries[j];
+                break;
+            }
+        }
+        if (target)
+            break; // Found it!
+    }
+
+    if (!target)
+        return -1; // File not found
+
+    // 2. Follow the data blocks and copy the text
+    uint32_t current_block = target->start_block;
+    int bytes_read = 0;
+
+    while (current_block != END_OF_FILE && current_block != FREE_BLOCK) {
+        read_write_disk(sector_buf, current_block, false);
+        struct data_block *db = (struct data_block *)sector_buf;
+
+        // Calculate how much to copy to prevent overflowing the buffer
+        int remaining_in_file = target->size - bytes_read;
+        int copy_size =
+            remaining_in_file < DATA_SIZE ? remaining_in_file : DATA_SIZE;
+
+        if (bytes_read + copy_size > max_len) {
+            copy_size = max_len - bytes_read;
+        }
+
+        // Copy this chunk of data into the user's buffer
+        memcpy(buf + bytes_read, db->data, copy_size);
+        bytes_read += copy_size;
+
+        if (bytes_read >= max_len || (uint32_t)bytes_read >= target->size)
+            break;
+
+        // Hop to the next block using the pointer!
+        current_block = db->next_block;
+    }
+
+    return bytes_read;
+}
+
+void handle_syscall(struct trap_frame *f) {
+    switch (f->a3) {
+    case SYS_PUTCHAR:
+        putchar(f->a0);
+        break;
+    case SYS_GETCHAR:
+        while (1) {
+            long ch = getchar();
+            if (ch >= 0) {
+                f->a0 = ch;
+                break;
+            }
+
+            yield();
+        }
+        break;
+    case SYS_EXIT:
+        printf("process %d exited\n", current_proc->pid);
+        current_proc->state = PROC_EXITED;
+        yield();
+        PANIC("unreachable");
+    case SYS_LISTFILES:
+        fs_list_files();
+        break;
+    case SYS_READFILE: {
+        const char *user_filename = (const char *)f->a0;
+        char *user_buf = (char *)f->a1;
+        int max_len = f->a2;
+
+        // Phase 4: Isolated Kernel Bounce Buffers
+        char k_filename[20];
+        char k_data_buf[512]; // Safe internal buffer (adjust size as needed)
+
+        // 1. Temporarily enable Supervisor User Memory (SUM) bit (Bit 18)
+        uint32_t sstatus = READ_CSR(sstatus);
+        WRITE_CSR(sstatus, sstatus | (1 << 18));
+
+        // 2. Safely copy the filename from user space
+        int i = 0;
+        while (i < 19 && user_filename[i] != '\0') {
+            k_filename[i] = user_filename[i];
+            i++;
+        }
+        k_filename[i] = '\0';
+
+        // Disable SUM while doing internal filesystem work
+        WRITE_CSR(sstatus, sstatus & ~(1 << 18));
+
+        // 3. Read the file into the kernel's isolated bounce buffer
+        int read_len = max_len < 512 ? max_len : 512;
+        int bytes_read = fs_read_file(k_filename, k_data_buf, read_len);
+
+        // 4. If successful, copy the data back to the mapped user buffer
+        if (bytes_read > 0) {
+            WRITE_CSR(sstatus, READ_CSR(sstatus) | (1 << 18)); // Enable SUM
+
+            memcpy(user_buf, k_data_buf, bytes_read);
+
+            WRITE_CSR(sstatus, READ_CSR(sstatus) & ~(1 << 18)); // Disable SUM
+        }
+
+        f->a0 = bytes_read;
+        break;
+    }
+    default:
+        PANIC("unexpected syscall a3=%x\n", f->a3);
+    }
+}
+
 void kernel_main(void) {
     memset(__bss, 0, (size_t)__bss_end - (size_t)__bss);
 
@@ -580,6 +753,7 @@ void kernel_main(void) {
     //    __asm__ __volatile__("wfi"); // Wait For Interrupt (saves CPU power)
     //}
 }
+
 __attribute__((section(".text.boot"))) __attribute__((naked)) void boot(void) {
     __asm__ __volatile__(
         "mv sp, %[stack_top]\n" // Set the stack pointer

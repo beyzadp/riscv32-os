@@ -1,16 +1,16 @@
 # Toolchain variables
 CC = /usr/bin/clang
+HOST_CC = gcc
 OBJCOPY = llvm-objcopy
 QEMU = qemu-system-riscv32
 
 # Directories
 SRC_DIR = src
 BUILD_DIR = build
-DISK_DIR = disk
 
-# Compiler flags
+# Compiler flags (cleaned up duplicated include paths)
 CFLAGS = -std=c11 -O2 -g3 -Wall -Wextra --target=riscv32-unknown-elf \
-         -fno-stack-protector -ffreestanding -nostdlib -I$(SRC_DIR)/common -Iinclude -I$(SRC_DIR)/common -I$(SRC_DIR)/kernel
+         -fno-stack-protector -ffreestanding -nostdlib -Iinclude -I$(SRC_DIR)/common -I$(SRC_DIR)/kernel
 
 # Linker flags for Kernel and User
 KERNEL_LDFLAGS = -fuse-ld=lld -Wl,-T$(SRC_DIR)/kernel/kernel.ld -Wl,-Map=$(BUILD_DIR)/kernel.map
@@ -28,15 +28,15 @@ USER_OBJS = $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(USER_SRCS))
 KERNEL_TARGET = $(BUILD_DIR)/kernel.elf
 USER_TARGET = $(BUILD_DIR)/shell.elf
 
-# QEMU arguments
+# QEMU arguments (Updated to use disk.img)
 QEMU_FLAGS = -machine virt -bios default -nographic -serial mon:stdio --no-reboot \
              -d unimp,guest_errors,int,cpu_reset -D qemu.log \
-             -drive id=drive0,file=disk.tar,format=raw,if=none \
+             -drive id=drive0,file=disk.img,format=raw,if=none \
              -device virtio-blk-device,drive=drive0,bus=virtio-mmio-bus.0 \
              -kernel $(KERNEL_TARGET)
 
 # Phony targets
-.PHONY: all shell run clean
+.PHONY: all shell run clean extract
 
 # Default target
 all: $(KERNEL_TARGET) $(USER_TARGET)
@@ -44,10 +44,26 @@ all: $(KERNEL_TARGET) $(USER_TARGET)
 # Build user shell artifacts
 shell: $(BUILD_DIR)/shell.bin.o
 
-# Build the disk image (tolerate empty disk directory)
-disk.tar: $(wildcard $(DISK_DIR)/*.txt)
-	@mkdir -p $(DISK_DIR)
-	@(cd $(DISK_DIR) && { ls *.txt >/dev/null 2>&1 && tar cf ../$@ --format=ustar *.txt || tar cf ../$@ --format=ustar --files-from /dev/null; })
+# Build the host-side file system generation tool inside the build directory
+$(BUILD_DIR)/mkfs: tools/mkfs.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -O2 -Wall -o $@ $<
+
+# Build the host-side file system extraction tool inside the build directory
+$(BUILD_DIR)/extractfs: tools/extractfs.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) -O2 -Wall -o $@ $<
+
+# Create a 1MB disk image and inject files from the disk/ directory
+disk.img: $(BUILD_DIR)/mkfs $(wildcard disk/*)
+	@mkdir -p disk
+	dd if=/dev/zero of=$@ bs=512 count=2048
+	./$(BUILD_DIR)/mkfs $@ disk/
+
+# Target to extract files from the disk image back to the host folder
+extract: $(BUILD_DIR)/extractfs
+	@mkdir -p disk
+	./$(BUILD_DIR)/extractfs disk.img disk/
 
 # Rule to link the kernel
 $(KERNEL_TARGET): $(KERNEL_OBJS) $(BUILD_DIR)/shell.bin.o
@@ -72,10 +88,10 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Target to build and run
-run: all disk.tar
+# Target to build and run (depends on disk.img)
+run: all disk.img
 	$(QEMU) $(QEMU_FLAGS)
 
-# Target to clean up all built files
+# Target to clean up all built files and the disk image
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR) disk.img

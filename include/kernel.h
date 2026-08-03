@@ -14,11 +14,6 @@ typedef unsigned char uint8_t;
 typedef unsigned int uint32_t;
 typedef uint32_t size_t;
 
-void kernel_main(void);
-
-struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
-                       long arg5, long fid, long eid);
-
 #include "common.h"
 
 struct trap_frame {
@@ -164,3 +159,69 @@ struct virtio_blk_req {
     // Third descriptor: writable by the device (VIRTQ_DESC_F_WRITE)
     uint8_t status;
 } __attribute__((packed));
+
+// --- Custom File System Definitions ---
+
+#define POINTER_SIZE 4
+#define DATA_SIZE (SECTOR_SIZE - POINTER_SIZE) // 508 bytes
+
+#define END_OF_FILE 0xFFFFFFFF
+#define FREE_BLOCK 0xFFFFFFFE
+
+#define SUPERBLOCK_IDX 0
+#define DIR_START_IDX 1
+#define DIR_BLOCKS 4
+#define DATA_START_IDX 5
+
+struct superblock {
+    char magic[8]; // "MYFS\0\0\0\0"
+    uint32_t total_blocks;
+    uint32_t dir_blocks;
+    uint32_t data_start_block;
+    uint8_t padding[492];
+} __attribute__((packed));
+
+struct dir_entry {
+    uint8_t in_use;
+    char name[19];
+    uint32_t size;
+    uint32_t start_block;
+    uint32_t reserved;
+} __attribute__((packed));
+
+struct data_block {
+    uint8_t data[DATA_SIZE];
+    uint32_t next_block;
+} __attribute__((packed));
+
+void putchar(char ch);
+struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
+                       long arg5, long fid, long eid);
+void handle_syscall(struct trap_frame *f);
+void handle_trap(struct trap_frame *f);
+__attribute__((naked)) __attribute__((aligned(4))) void kernel_entry(void);
+paddr_t alloc_pages(uint32_t n);
+__attribute__((naked)) void switch_context(uint32_t *prev_sp,
+                                           uint32_t *next_sp);
+void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags);
+__attribute__((naked)) void user_entry(void);
+struct process *create_process(const void *image, size_t image_size);
+uint32_t virtio_reg_read32(unsigned offset);
+uint64_t virtio_reg_read64(unsigned offset);
+void virtio_reg_write32(unsigned offset, uint32_t value);
+void virtio_reg_fetch_and_or32(unsigned offset, uint32_t value);
+struct virtio_virtq *virtq_init(unsigned index);
+void virtio_blk_init(void);
+void virtq_kick(struct virtio_virtq *vq, int desc_index);
+bool virtq_is_busy(struct virtio_virtq *vq);
+void read_write_disk(void *buf, unsigned sector, int is_write);
+void delay(void);
+void yield(void);
+void proc_a_entry(void);
+void proc_b_entry(void);
+long getchar(void);
+void fs_format(void);
+void fs_init(void);
+void fs_list_files(void);
+void kernel_main(void);
+__attribute__((section(".text.boot"))) __attribute__((naked)) void boot(void);
