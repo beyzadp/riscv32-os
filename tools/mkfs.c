@@ -1,4 +1,3 @@
-// tools/mkfs.c
 #include <dirent.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -42,8 +41,7 @@ struct data_block {
     uint32_t next_block;
 } __attribute__((packed));
 
-// We will load the entire 1MB disk into host RAM, manipulate it, and write it
-// back.
+// The disk image is built entirely in host RAM, then flushed to file.
 uint8_t disk[TOTAL_BLOCKS * SECTOR_SIZE];
 uint32_t next_free_block = DATA_START_IDX;
 
@@ -117,10 +115,10 @@ void inject_file(const char *host_filepath, const char *filename) {
         next_free_block++; // Move to the next block globally
 
         if (bytes_read < filesize) {
-            db->next_block = next_free_block; // Point to the next block
+            db->next_block = next_free_block;
             current_block = next_free_block;
         } else {
-            db->next_block = END_OF_FILE; // Terminate the chain
+            db->next_block = END_OF_FILE;
         }
     }
 
@@ -142,7 +140,7 @@ int main(int argc, char **argv) {
     if (dir) {
         struct dirent *ent;
         while ((ent = readdir(dir)) != NULL) {
-            if (ent->d_type == DT_REG) { // If it's a regular file
+            if (ent->d_type == DT_REG) {
                 char filepath[256];
                 snprintf(filepath, sizeof(filepath), "%s/%s", argv[2],
                          ent->d_name);

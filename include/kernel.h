@@ -194,18 +194,32 @@ struct data_block {
     uint32_t next_block;
 } __attribute__((packed));
 
-void putchar(char ch);
+// --- SBI / Console I/O ---
 struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
                        long arg5, long fid, long eid);
-void handle_syscall(struct trap_frame *f);
+void putchar(char ch);
+long getchar(void);
+
+// --- Trap and Syscall Handling ---
 void handle_trap(struct trap_frame *f);
 __attribute__((naked)) __attribute__((aligned(4))) void kernel_entry(void);
+void handle_syscall(struct trap_frame *f);
+
+// --- Memory Management ---
 paddr_t alloc_pages(uint32_t n);
+void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags);
+
+// --- Process Management ---
 __attribute__((naked)) void switch_context(uint32_t *prev_sp,
                                            uint32_t *next_sp);
-void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags);
 __attribute__((naked)) void user_entry(void);
 struct process *create_process(const void *image, size_t image_size);
+void yield(void);
+void delay(void);
+void proc_a_entry(void);
+void proc_b_entry(void);
+
+// --- virtio-blk Driver ---
 uint32_t virtio_reg_read32(unsigned offset);
 uint64_t virtio_reg_read64(unsigned offset);
 void virtio_reg_write32(unsigned offset, uint32_t value);
@@ -215,13 +229,14 @@ void virtio_blk_init(void);
 void virtq_kick(struct virtio_virtq *vq, int desc_index);
 bool virtq_is_busy(struct virtio_virtq *vq);
 void read_write_disk(void *buf, unsigned sector, int is_write);
-void delay(void);
-void yield(void);
-void proc_a_entry(void);
-void proc_b_entry(void);
-long getchar(void);
+
+// --- Custom File System (MYFS) ---
 void fs_format(void);
 void fs_init(void);
 void fs_list_files(void);
+int fs_read_file(const char *filename, char *buf, int max_len);
+int fs_write_file(const char *filename, const char *data, int len);
+
+// --- Entry Points ---
 void kernel_main(void);
 __attribute__((section(".text.boot"))) __attribute__((naked)) void boot(void);

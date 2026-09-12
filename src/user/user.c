@@ -39,3 +39,7 @@ void listfiles(void) { syscall(SYS_LISTFILES, 0, 0, 0); }
 int readfile(const char *filename, char *buf, int max_len) {
     return syscall(SYS_READFILE, (int)filename, (int)buf, max_len);
 }
+
+int writefile(const char *filename, const char *buf, int len) {
+    return syscall(SYS_WRITEFILE, (int)filename, (int)buf, len);
+}

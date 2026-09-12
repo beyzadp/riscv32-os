@@ -8,52 +8,55 @@ void main(void) {
         char cmdline[128];
 
         // 1. Read user input character by character
-        for (int i = 0;; i++) {
+        int i = 0;
+        while (1) {
             char ch = getchar();
-            putchar(ch);
-            if (i == sizeof(cmdline) - 1) {
-                printf("command line too long\n");
-                goto prompt;
-            } else if (ch == '\r') {
+
+            if (ch == '\r') {
+                putchar(ch);
                 printf("\n");
                 cmdline[i] = '\0';
                 break;
+            } else if (ch == 127 || ch == '\b') {
+                // Backspace/Delete: erase the last character, if any
+                if (i > 0) {
+                    i--;
+                    printf("\b \b");
+                }
+            } else if (i == sizeof(cmdline) - 1) {
+                printf("command line too long\n");
+                goto prompt;
             } else {
-                cmdline[i] = ch;
+                putchar(ch);
+                cmdline[i++] = ch;
             }
         }
 
-// 2. Tokenizer (The Parser)
-// This chops the single cmdline string into an array of words (argv)
+// Tokenizer: split cmdline into argv words
 #define MAX_ARGS 16
         char *argv[MAX_ARGS];
         int argc = 0;
 
         char *p = cmdline;
         while (*p != '\0' && argc < MAX_ARGS) {
-            // Skip any extra spaces before a word
+            // Skip leading spaces
             while (*p == ' ')
                 p++;
             if (*p == '\0')
                 break;
 
-            // Save the starting pointer of the word into argv
             argv[argc++] = p;
 
-            // Fast-forward to the end of the current word
+            // Advance to the end of the word
             while (*p != ' ' && *p != '\0')
                 p++;
 
-            // If we hit a space, replace it with a null-terminator
-            // This isolates the word so strcmp() works perfectly!
+            // Null-terminate the word in place
             if (*p == ' ') {
                 *p = '\0';
                 p++;
             }
         }
-
-        // 3. Command Evaluator
-        // Now we use argv[0] for the command, and argv[1] for the file!
 
         if (argc == 0) {
             // User just pressed Enter, do nothing and show prompt again
@@ -63,13 +66,10 @@ void main(void) {
         } else if (strcmp(argv[0], "ls") == 0) {
             listfiles();
         } else if (strcmp(argv[0], "cat") == 0) {
-            // Check if they forgot to type the filename (e.g., just typed
-            // "cat")
             if (argc < 2) {
                 printf("Usage: cat <filename>\n");
             } else {
-                static char buf[1024]; // Read the file specified in argv[1]
-                                       // (like "suvari.txt")
+                static char buf[1024];
                 int len = readfile(argv[1], buf, sizeof(buf) - 1);
 
                 if (len < 0) {
@@ -79,24 +79,37 @@ void main(void) {
                     printf("%s\n", buf);
                 }
             }
-        } /* else if (strcmp(argv[0], "write") == 0) {
-             // Check if they forgot the filename
-             if (argc < 2) {
-                 printf("Usage: write <filename>\n");
-             } else {
-                 // Hardcoding the message for now to avoid complex quote
-         parsing const char *msg = "This file was created entirely from inside
-         the OS!\n"; int written = writefile(argv[1], msg, 51); // String is
-         exactly 51 bytes
+        } else if (strcmp(argv[0], "write") == 0) {
+            if (argc < 3) {
+                printf("Usage: write <filename> <content>\n");
+            } else {
+                // Re-join argv[2..] with single spaces; the tokenizer already
+                // collapsed the original whitespace, so exact spacing isn't
+                // preserved.
+                static char content[512];
+                int len = 0;
 
-                 if (written > 0) {
-                     printf("Successfully wrote to %s\n", argv[1]);
-                 } else {
-                     printf("Failed to write file.\n");
-                 }
-             }
-         }*/
-        else if (strcmp(argv[0], "exit") == 0) {
+                for (int a = 2; a < argc && len < (int)sizeof(content) - 1;
+                     a++) {
+                    if (a > 2)
+                        content[len++] = ' ';
+
+                    for (int k = 0;
+                         argv[a][k] != '\0' && len < (int)sizeof(content) - 1;
+                         k++)
+                        content[len++] = argv[a][k];
+                }
+                content[len] = '\0';
+
+                int written = writefile(argv[1], content, len);
+
+                if (written > 0) {
+                    printf("Successfully wrote to %s\n", argv[1]);
+                } else {
+                    printf("Failed to write file.\n");
+                }
+            }
+        } else if (strcmp(argv[0], "exit") == 0) {
             exit();
         } else {
             printf("unknown command: %s\n", argv[0]);

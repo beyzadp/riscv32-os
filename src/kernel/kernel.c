@@ -5,37 +5,30 @@ extern char __bss[], __bss_end[], __stack_top[];
 extern char __free_ram[], __free_ram_end[];
 extern char __kernel_base[];
 
-struct process *current_proc; // Pointer to the currently running process
-struct process *idle_proc;    // Pointer to the idle process
-
-void putchar(char ch);
-struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
-                       long arg5, long fid, long eid);
-void handle_syscall(struct trap_frame *f);
-void handle_trap(struct trap_frame *f);
-__attribute__((naked)) __attribute__((aligned(4))) void kernel_entry(void);
-paddr_t alloc_pages(uint32_t n);
-__attribute__((naked)) void switch_context(uint32_t *prev_sp,
-                                           uint32_t *next_sp);
-void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags);
-__attribute__((naked)) void user_entry(void);
-struct process *create_process(const void *image, size_t image_size);
-void delay(void);
-void yield(void);
-void proc_a_entry(void);
-void proc_b_entry(void);
-long getchar(void);
-void kernel_main(void);
-__attribute__((section(".text.boot"))) __attribute__((naked)) void boot(void);
-
 // define symbols to use the embedded raw binary in shell.bin.o
 extern char _binary_build_shell_bin_start[], _binary_build_shell_bin_size[];
 
 #define USER_BASE 0x1000000
 
-void putchar(char ch) {
-    sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* Console Putchar */);
-}
+#define PANIC(fmt, ...)                                                        \
+    do {                                                                       \
+        printf("PANIC: %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);  \
+        while (1) {                                                            \
+        }                                                                      \
+    } while (0)
+
+struct process *current_proc;    // Pointer to the currently running process
+struct process *idle_proc;       // Pointer to the idle process
+struct process procs[PROCS_MAX]; // All process control structures.
+struct process *proc_a;
+struct process *proc_b;
+
+struct virtio_virtq *blk_request_vq;
+struct virtio_blk_req *blk_req;
+paddr_t blk_req_paddr;
+uint64_t blk_capacity;
+
+// --- SBI / Console I/O ---
 
 struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
                        long arg5, long fid, long eid) {
@@ -56,19 +49,23 @@ struct sbiret sbi_call(long arg0, long arg1, long arg2, long arg3, long arg4,
     return (struct sbiret){.error = a0, .value = a1};
 }
 
-#define PANIC(fmt, ...)                                                        \
-    do {                                                                       \
-        printf("PANIC: %s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);  \
-        while (1) {                                                            \
-        }                                                                      \
-    } while (0)
+void putchar(char ch) {
+    sbi_call(ch, 0, 0, 0, 0, 0, 0, 1 /* Console Putchar */);
+}
+
+long getchar(void) {
+    struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2);
+    return ret.error;
+}
+
+// --- Trap and Syscall Handling ---
 
 void handle_trap(struct trap_frame *f) {
     uint32_t scause = READ_CSR(scause);
     uint32_t stval = READ_CSR(stval);
     uint32_t user_pc = READ_CSR(sepc);
 
-    if (scause == SCAUSE_ECALL) { // if its because of an ecall from user
+    if (scause == SCAUSE_ECALL) {
         handle_syscall(f);
         user_pc += 4;
     } else {
@@ -163,6 +160,97 @@ __attribute__((naked)) __attribute__((aligned(4))) void kernel_entry(void) {
         "sret\n");
 }
 
+void handle_syscall(struct trap_frame *f) {
+    switch (f->a3) {
+    case SYS_PUTCHAR:
+        putchar(f->a0);
+        break;
+    case SYS_GETCHAR:
+        while (1) {
+            long ch = getchar();
+            if (ch >= 0) {
+                f->a0 = ch;
+                break;
+            }
+
+            yield();
+        }
+        break;
+    case SYS_EXIT:
+        printf("process %d exited\n", current_proc->pid);
+        current_proc->state = PROC_EXITED;
+        yield();
+        PANIC("unreachable");
+    case SYS_LISTFILES:
+        fs_list_files();
+        break;
+    case SYS_READFILE: {
+        const char *user_filename = (const char *)f->a0;
+        char *user_buf = (char *)f->a1;
+        int max_len = f->a2;
+
+        char k_filename[20];
+        char k_data_buf[512];
+
+        // SUM (bit 18) must be set to touch user memory from S-mode
+        uint32_t sstatus = READ_CSR(sstatus);
+        WRITE_CSR(sstatus, sstatus | (1 << 18));
+
+        int i = 0;
+        while (i < 19 && user_filename[i] != '\0') {
+            k_filename[i] = user_filename[i];
+            i++;
+        }
+        k_filename[i] = '\0';
+
+        WRITE_CSR(sstatus, sstatus & ~(1 << 18));
+
+        int read_len = max_len < 512 ? max_len : 512;
+        int bytes_read = fs_read_file(k_filename, k_data_buf, read_len);
+
+        if (bytes_read > 0) {
+            WRITE_CSR(sstatus, READ_CSR(sstatus) | (1 << 18));
+            memcpy(user_buf, k_data_buf, bytes_read);
+            WRITE_CSR(sstatus, READ_CSR(sstatus) & ~(1 << 18));
+        }
+
+        f->a0 = bytes_read;
+        break;
+    }
+    case SYS_WRITEFILE: {
+        const char *user_filename = (const char *)f->a0;
+        const char *user_buf = (const char *)f->a1;
+        int len = f->a2;
+
+        char k_filename[20];
+        char k_data_buf[512];
+
+        // SUM (bit 18) must be set to touch user memory from S-mode
+        uint32_t sstatus = READ_CSR(sstatus);
+        WRITE_CSR(sstatus, sstatus | (1 << 18));
+
+        int i = 0;
+        while (i < 19 && user_filename[i] != '\0') {
+            k_filename[i] = user_filename[i];
+            i++;
+        }
+        k_filename[i] = '\0';
+
+        int write_len = len < (int)sizeof(k_data_buf) ? len : (int)sizeof(k_data_buf);
+        memcpy(k_data_buf, user_buf, write_len);
+
+        WRITE_CSR(sstatus, sstatus & ~(1 << 18));
+
+        f->a0 = fs_write_file(k_filename, k_data_buf, write_len);
+        break;
+    }
+    default:
+        PANIC("unexpected syscall a3=%x\n", f->a3);
+    }
+}
+
+// --- Memory Management ---
+
 paddr_t alloc_pages(uint32_t n) {
     static paddr_t next_paddr = (paddr_t)__free_ram;
     paddr_t paddr = next_paddr;
@@ -174,6 +262,28 @@ paddr_t alloc_pages(uint32_t n) {
     memset((void *)paddr, 0, n * PAGE_SIZE);
     return paddr;
 }
+
+void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
+    if (!is_aligned(vaddr, PAGE_SIZE))
+        PANIC("unaligned vaddr %x", vaddr);
+
+    if (!is_aligned(paddr, PAGE_SIZE))
+        PANIC("unaligned paddr %x", paddr);
+
+    uint32_t vpn1 = (vaddr >> 22) & 0x3ff;
+    if ((table1[vpn1] & PAGE_V) == 0) {
+        // Create the 1st level page table if it doesn't exist.
+        uint32_t pt_paddr = alloc_pages(1);
+        table1[vpn1] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V;
+    }
+
+    // Set the 2nd level page table entry to map the physical page.
+    uint32_t vpn0 = (vaddr >> 12) & 0x3ff;
+    uint32_t *table0 = (uint32_t *)((table1[vpn1] >> 10) * PAGE_SIZE);
+    table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V;
+}
+
+// --- Process Management ---
 
 __attribute__((naked)) void switch_context(uint32_t *prev_sp,
                                            uint32_t *next_sp) {
@@ -212,29 +322,8 @@ __attribute__((naked)) void switch_context(uint32_t *prev_sp,
         "ret\n");
 }
 
-struct process procs[PROCS_MAX]; // All process control structures.
-
-void map_page(uint32_t *table1, uint32_t vaddr, paddr_t paddr, uint32_t flags) {
-    if (!is_aligned(vaddr, PAGE_SIZE))
-        PANIC("unaligned vaddr %x", vaddr);
-
-    if (!is_aligned(paddr, PAGE_SIZE))
-        PANIC("unaligned paddr %x", paddr);
-
-    uint32_t vpn1 = (vaddr >> 22) & 0x3ff;
-    if ((table1[vpn1] & PAGE_V) == 0) {
-        // Create the 1st level page table if it doesn't exist.
-        uint32_t pt_paddr = alloc_pages(1);
-        table1[vpn1] = ((pt_paddr / PAGE_SIZE) << 10) | PAGE_V;
-    }
-
-    // Set the 2nd level page table entry to map the physical page.
-    uint32_t vpn0 = (vaddr >> 12) & 0x3ff;
-    uint32_t *table0 = (uint32_t *)((table1[vpn1] >> 10) * PAGE_SIZE);
-    table0[vpn0] = ((paddr / PAGE_SIZE) << 10) | flags | PAGE_V;
-}
-
-// ↓ __attribute__((naked)) is very important!
+// naked: must not have a prologue/epilogue, since it never returns and
+// sret jumps straight into user mode from the raw register state below.
 __attribute__((naked)) void user_entry(void) {
     __asm__ __volatile__("csrw sepc, %[sepc]        \n"
                          "csrw sstatus, %[sstatus]  \n"
@@ -304,6 +393,61 @@ struct process *create_process(const void *image, size_t image_size) {
     return proc;
 }
 
+void yield(void) {
+    // Search for a runnable process
+    struct process *next = idle_proc;
+    for (int i = 0; i < PROCS_MAX; i++) {
+        struct process *proc = &procs[(current_proc->pid + i) % PROCS_MAX];
+        if (proc->state == PROC_RUNNABLE && proc->pid > 0) {
+            next = proc;
+            break;
+        }
+    }
+
+    // If there's no runnable process other than the current one, return and
+    // continue processing
+    if (next == current_proc)
+        return;
+
+    // Context switch
+    struct process *prev = current_proc;
+    current_proc = next;
+
+    __asm__ __volatile__(
+        "sfence.vma\n"
+        "csrw satp, %[satp]\n"
+        "sfence.vma\n"
+        "csrw sscratch, %[sscratch]\n"
+        :
+        : [satp] "r"(SATP_SV32 | ((uint32_t)next->page_table / PAGE_SIZE)),
+          [sscratch] "r"((uint32_t)&next->stack[sizeof(next->stack)]));
+
+    switch_context(&prev->sp, &next->sp);
+}
+
+void delay(void) {
+    for (int i = 0; i < 30000000; i++)
+        __asm__ __volatile__("nop");
+}
+
+void proc_a_entry(void) {
+    printf("starting process A\n");
+    while (1) {
+        putchar('A');
+        yield();
+    }
+}
+
+void proc_b_entry(void) {
+    printf("starting process B\n");
+    while (1) {
+        putchar('B');
+        yield();
+    }
+}
+
+// --- virtio-blk Driver ---
+
 uint32_t virtio_reg_read32(unsigned offset) {
     return *((volatile uint32_t *)(VIRTIO_BLK_PADDR + offset));
 }
@@ -337,11 +481,6 @@ struct virtio_virtq *virtq_init(unsigned index) {
     return vq;
 }
 
-struct virtio_virtq *blk_request_vq;
-struct virtio_blk_req *blk_req;
-paddr_t blk_req_paddr;
-uint64_t blk_capacity;
-
 void virtio_blk_init(void) {
     if (virtio_reg_read32(VIRTIO_REG_MAGIC) != 0x74726976)
         PANIC("virtio: invalid magic value");
@@ -350,19 +489,17 @@ void virtio_blk_init(void) {
     if (virtio_reg_read32(VIRTIO_REG_DEVICE_ID) != VIRTIO_DEVICE_BLK)
         PANIC("virtio: invalid device id");
 
-    // 1. Reset the device.
-    virtio_reg_write32(VIRTIO_REG_DEVICE_STATUS, 0);
-    // 2. Set the ACKNOWLEDGE status bit: We found the device.
-    virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_ACK);
-    // 3. Set the DRIVER status bit: We know how to use the device.
-    virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_DRIVER);
-    // Set our page size: We use 4KB pages. This defines PFN (page frame number)
-    // calculation.
-    virtio_reg_write32(VIRTIO_REG_PAGE_SIZE, PAGE_SIZE);
-    // Initialize a queue for disk read/write requests.
-    blk_request_vq = virtq_init(0);
-    // 6. Set the DRIVER_OK status bit: We can now use the device!
-    virtio_reg_write32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_DRIVER_OK);
+    // virtio device init sequence:
+    virtio_reg_write32(VIRTIO_REG_DEVICE_STATUS, 0); // 1. Reset
+    virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS,
+                              VIRTIO_STATUS_ACK); // 2. Acknowledge
+    virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS,
+                              VIRTIO_STATUS_DRIVER); // 3. Driver
+    virtio_reg_write32(VIRTIO_REG_PAGE_SIZE,
+                       PAGE_SIZE);  // 4. Use 4KB pages for the PFN below
+    blk_request_vq = virtq_init(0); // 5. Set up the request virtqueue
+    virtio_reg_write32(VIRTIO_REG_DEVICE_STATUS,
+                       VIRTIO_STATUS_DRIVER_OK); // 6. Driver OK
 
     // Get the disk capacity.
     blk_capacity =
@@ -440,70 +577,7 @@ void read_write_disk(void *buf, unsigned sector, int is_write) {
         memcpy(buf, blk_req->data, SECTOR_SIZE);
 }
 
-void delay(void) {
-    for (int i = 0; i < 30000000; i++)
-        __asm__ __volatile__("nop"); // do nothing
-}
-
-struct process *current_proc; // Currently running process
-struct process *idle_proc;    // Idle process
-
-void yield(void) {
-    // Search for a runnable process
-    struct process *next = idle_proc;
-    for (int i = 0; i < PROCS_MAX; i++) {
-        struct process *proc = &procs[(current_proc->pid + i) % PROCS_MAX];
-        if (proc->state == PROC_RUNNABLE && proc->pid > 0) {
-            next = proc;
-            break;
-        }
-    }
-
-    // If there's no runnable process other than the current one, return and
-    // continue processing
-    if (next == current_proc)
-        return;
-
-    // Context switch
-    struct process *prev = current_proc;
-    current_proc = next;
-
-    __asm__ __volatile__(
-        "sfence.vma\n"
-        "csrw satp, %[satp]\n"
-        "sfence.vma\n"
-        "csrw sscratch, %[sscratch]\n"
-        :
-        // Don't forget the trailing comma!
-        : [satp] "r"(SATP_SV32 | ((uint32_t)next->page_table / PAGE_SIZE)),
-          [sscratch] "r"((uint32_t)&next->stack[sizeof(next->stack)]));
-
-    switch_context(&prev->sp, &next->sp);
-}
-
-struct process *proc_a;
-struct process *proc_b;
-
-void proc_a_entry(void) {
-    printf("starting process A\n");
-    while (1) {
-        putchar('A');
-        yield();
-    }
-}
-
-void proc_b_entry(void) {
-    printf("starting process B\n");
-    while (1) {
-        putchar('B');
-        yield();
-    }
-}
-
-long getchar(void) {
-    struct sbiret ret = sbi_call(0, 0, 0, 0, 0, 0, 0, 2);
-    return ret.error;
-}
+// --- Custom File System (MYFS) ---
 
 void fs_format(void) {
     printf("Formatting disk...\n");
@@ -537,7 +611,7 @@ void fs_format(void) {
 void fs_init(void) {
     uint8_t sector_buf[SECTOR_SIZE];
 
-    // Read sector 0 to check for our file system
+    // Read sector 0 to check for the file system
     read_write_disk(sector_buf, SUPERBLOCK_IDX, false);
     struct superblock *sb = (struct superblock *)sector_buf;
 
@@ -598,13 +672,16 @@ int fs_read_file(const char *filename, char *buf, int max_len) {
             }
         }
         if (target)
-            break; // Found it!
+            break;
     }
 
     if (!target)
-        return -1; // File not found
+        return -1;
 
-    // 2. Follow the data blocks and copy the text
+    // 2. Follow the data blocks and copy the text.
+    // Snapshot these now: target aliases sector_buf, which the loop below
+    // overwrites with each data block's contents.
+    uint32_t file_size = target->size;
     uint32_t current_block = target->start_block;
     int bytes_read = 0;
 
@@ -613,7 +690,7 @@ int fs_read_file(const char *filename, char *buf, int max_len) {
         struct data_block *db = (struct data_block *)sector_buf;
 
         // Calculate how much to copy to prevent overflowing the buffer
-        int remaining_in_file = target->size - bytes_read;
+        int remaining_in_file = file_size - bytes_read;
         int copy_size =
             remaining_in_file < DATA_SIZE ? remaining_in_file : DATA_SIZE;
 
@@ -621,103 +698,92 @@ int fs_read_file(const char *filename, char *buf, int max_len) {
             copy_size = max_len - bytes_read;
         }
 
-        // Copy this chunk of data into the user's buffer
         memcpy(buf + bytes_read, db->data, copy_size);
         bytes_read += copy_size;
 
-        if (bytes_read >= max_len || (uint32_t)bytes_read >= target->size)
+        if (bytes_read >= max_len || (uint32_t)bytes_read >= file_size)
             break;
 
-        // Hop to the next block using the pointer!
         current_block = db->next_block;
     }
 
     return bytes_read;
 }
 
-void handle_syscall(struct trap_frame *f) {
-    switch (f->a3) {
-    case SYS_PUTCHAR:
-        putchar(f->a0);
-        break;
-    case SYS_GETCHAR:
-        while (1) {
-            long ch = getchar();
-            if (ch >= 0) {
-                f->a0 = ch;
+// Writes data to a file, creating it if needed or overwriting it if it
+// already exists. Content is capped at one data block (DATA_SIZE bytes);
+// overwriting an existing file does not free its old block, so repeated
+// writes to the same filename each leak one block.
+int fs_write_file(const char *filename, const char *data, int len) {
+    if (len > DATA_SIZE)
+        len = DATA_SIZE;
+
+    uint8_t sector_buf[SECTOR_SIZE];
+    int entries_per_sector = SECTOR_SIZE / sizeof(struct dir_entry);
+
+    int target_sector = -1, target_index = -1; // existing entry, if any
+    int free_sector = -1, free_index = -1;      // first free slot, if any
+
+    for (int i = 0; i < DIR_BLOCKS; i++) {
+        read_write_disk(sector_buf, DIR_START_IDX + i, false);
+        struct dir_entry *entries = (struct dir_entry *)sector_buf;
+
+        for (int j = 0; j < entries_per_sector; j++) {
+            if (entries[j].in_use && strcmp(entries[j].name, filename) == 0) {
+                target_sector = DIR_START_IDX + i;
+                target_index = j;
+            } else if (!entries[j].in_use && free_sector == -1) {
+                free_sector = DIR_START_IDX + i;
+                free_index = j;
+            }
+        }
+    }
+
+    int dir_sector = target_sector != -1 ? target_sector : free_sector;
+    int dir_index = target_sector != -1 ? target_index : free_index;
+    if (dir_sector == -1)
+        return -1; // directory full
+
+    uint32_t data_block = FREE_BLOCK;
+    if (len > 0) {
+        uint32_t total_blocks = blk_capacity / SECTOR_SIZE;
+        for (uint32_t b = DATA_START_IDX; b < total_blocks; b++) {
+            read_write_disk(sector_buf, b, false);
+            struct data_block *db = (struct data_block *)sector_buf;
+            if (db->next_block == FREE_BLOCK) {
+                data_block = b;
                 break;
             }
-
-            yield();
         }
-        break;
-    case SYS_EXIT:
-        printf("process %d exited\n", current_proc->pid);
-        current_proc->state = PROC_EXITED;
-        yield();
-        PANIC("unreachable");
-    case SYS_LISTFILES:
-        fs_list_files();
-        break;
-    case SYS_READFILE: {
-        const char *user_filename = (const char *)f->a0;
-        char *user_buf = (char *)f->a1;
-        int max_len = f->a2;
+        if (data_block == FREE_BLOCK)
+            return -1; // disk full
 
-        // Phase 4: Isolated Kernel Bounce Buffers
-        char k_filename[20];
-        char k_data_buf[512]; // Safe internal buffer (adjust size as needed)
-
-        // 1. Temporarily enable Supervisor User Memory (SUM) bit (Bit 18)
-        uint32_t sstatus = READ_CSR(sstatus);
-        WRITE_CSR(sstatus, sstatus | (1 << 18));
-
-        // 2. Safely copy the filename from user space
-        int i = 0;
-        while (i < 19 && user_filename[i] != '\0') {
-            k_filename[i] = user_filename[i];
-            i++;
-        }
-        k_filename[i] = '\0';
-
-        // Disable SUM while doing internal filesystem work
-        WRITE_CSR(sstatus, sstatus & ~(1 << 18));
-
-        // 3. Read the file into the kernel's isolated bounce buffer
-        int read_len = max_len < 512 ? max_len : 512;
-        int bytes_read = fs_read_file(k_filename, k_data_buf, read_len);
-
-        // 4. If successful, copy the data back to the mapped user buffer
-        if (bytes_read > 0) {
-            WRITE_CSR(sstatus, READ_CSR(sstatus) | (1 << 18)); // Enable SUM
-
-            memcpy(user_buf, k_data_buf, bytes_read);
-
-            WRITE_CSR(sstatus, READ_CSR(sstatus) & ~(1 << 18)); // Disable SUM
-        }
-
-        f->a0 = bytes_read;
-        break;
+        memset(sector_buf, 0, SECTOR_SIZE);
+        struct data_block *db = (struct data_block *)sector_buf;
+        memcpy(db->data, data, len);
+        db->next_block = END_OF_FILE;
+        read_write_disk(sector_buf, data_block, true);
     }
-    default:
-        PANIC("unexpected syscall a3=%x\n", f->a3);
-    }
+
+    read_write_disk(sector_buf, dir_sector, false);
+    struct dir_entry *entry = &((struct dir_entry *)sector_buf)[dir_index];
+    entry->in_use = true;
+    strcpy(entry->name, filename); // filename is already <=19 bytes (see handle_syscall)
+    entry->size = len;
+    entry->start_block = len > 0 ? data_block : END_OF_FILE;
+    read_write_disk(sector_buf, dir_sector, true);
+
+    return len;
 }
+
+// --- Entry Points ---
 
 void kernel_main(void) {
     memset(__bss, 0, (size_t)__bss_end - (size_t)__bss);
 
     WRITE_CSR(stvec, (uint32_t)kernel_entry);
-    //  __asm__ __volatile__("unimp");
 
-    virtio_blk_init(); //
-
-    char buf[SECTOR_SIZE];
-    read_write_disk(buf, 0, false /* read from the disk */);
-    printf("first sector: %s\n", buf);
-
-    strcpy(buf, "hello from kernel!!!\n");
-    read_write_disk(buf, 0, true /* write to the disk */);
+    virtio_blk_init();
 
     idle_proc = create_process(NULL, 0);
     idle_proc->pid = 0; // idle
@@ -728,30 +794,6 @@ void kernel_main(void) {
 
     yield();
     PANIC("switched to idle process");
-    // printf("1 + 2 = %d, %x\n", 1 + 2, 0x1234abcd);
-
-    // paddr_t paddr0 = alloc_pages(2);
-    // paddr_t paddr1 = alloc_pages(1);
-    // printf("alloc_pages test: paddr0=%x\n", paddr0);
-    // printf("alloc_pages test: paddr1=%x\n", paddr1);
-
-    // PANIC("Something went wrong: %d", -1);
-    // printf("This will never be printed\n");
-
-    // proc_a = create_process((uint32_t)proc_a_entry);
-    // proc_b = create_process((uint32_t)proc_b_entry);
-    // proc_a_entry();
-
-    // uint32_t ra_val;
-    //  Ask the compiler to move the current value of the 'ra' register into our
-    //  C variable
-    //__asm__ __volatile__("mv %0, ra" : "=r"(ra_val));
-
-    // printf("About to return! The RA register holds: 0x%x\n", ra_val);
-
-    // for (;;) {
-    //    __asm__ __volatile__("wfi"); // Wait For Interrupt (saves CPU power)
-    //}
 }
 
 __attribute__((section(".text.boot"))) __attribute__((naked)) void boot(void) {
